@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Udemy Transcript Extractor
+Udemy Course Copilot
 
 Parses Udemy transcript HTML files and extracts readable plain-text transcripts.
 Runs in batch mode over an input directory and writes results to an output directory.

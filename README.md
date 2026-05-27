@@ -1,4 +1,4 @@
-# Udemy Transcript Extractor
+# Udemy Course Copilot
 
 Batch-download readable course transcripts from Udemy via internal APIs, and generate AI-enhanced study notes from them.
 
@@ -145,7 +145,7 @@ uv run scripts/generate_notes.py --pattern day_1 --model gpt-4o-mini
 ## Project Layout
 
 ```
-udemy-transcript-extractor/
+udemy-course-copilot/
 ├── scripts/
 │   ├── fetch_transcripts.py      # API-based automatic downloader + metadata writer
 │   ├── extract_transcript.py     # HTML parser fallback

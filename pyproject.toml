@@ -1,7 +1,7 @@
 [project]
-name = "udemy-transcript-extractor"
+name = "udemy-course-copilot"
 version = "0.1.0"
-description = "Add your description here"
+description = "Udemy Course Copilot — batch-download course transcripts and generate AI-enhanced study notes"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
