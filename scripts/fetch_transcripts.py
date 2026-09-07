@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
+from curl_cffi import requests
 
 
 def find_project_root() -> Path:
@@ -39,11 +39,18 @@ def find_project_root() -> Path:
     return current
 
 
-def load_cookies(path: Path) -> dict[str, str]:
+def load_cookies(path: Path) -> requests.Cookies:
     """Load cookies from a JSON file exported by Playwright."""
     with path.open("r", encoding="utf-8") as f:
         cookies = json.load(f)
-    return {c["name"]: c["value"] for c in cookies}
+    jar = requests.Cookies()
+    for cookie in cookies:
+        jar.set(
+            cookie["name"], cookie["value"],
+            domain=cookie.get("domain") or "www.udemy.com",
+            path=cookie.get("path") or "/",
+        )
+    return jar
 
 
 def get_last_course_id(project_root: Path) -> str:
@@ -61,13 +68,9 @@ def save_last_course_id(project_root: Path, course_id: str) -> None:
     tmp_path.write_text(course_id, encoding="utf-8")
 
 
-def create_client(cookies: dict[str, str]) -> httpx.Client:
+def create_client(cookies: requests.Cookies) -> requests.Session:
+    # Match Chrome's TLS/HTTP fingerprint as well as its default headers.
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
         "DNT": "1",
@@ -77,21 +80,37 @@ def create_client(cookies: dict[str, str]) -> httpx.Client:
         "Sec-Fetch-Site": "same-origin",
         "X-Requested-With": "XMLHttpRequest",
     }
-    return httpx.Client(
+    return requests.Session(
+        impersonate="chrome",
         cookies=cookies,
         headers=headers,
         timeout=30.0,
-        follow_redirects=True,
+        allow_redirects=True,
     )
 
 
-def test_auth(client: httpx.Client) -> bool:
+def test_auth(client: requests.Session) -> bool:
     """Quick auth check using a lightweight endpoint."""
     resp = client.get("https://www.udemy.com/api-2.0/contexts/me/")
+    resp.raise_for_status()
     return resp.status_code == 200
 
 
-def fetch_curriculum(client: httpx.Client, course_id: str) -> list[dict[str, Any]]:
+def describe_http_error(response: requests.Response) -> str:
+    """Explain a failed request without exposing cookies or signed URLs."""
+    if response.headers.get("cf-mitigated") == "challenge":
+        return (
+            "Cloudflare browser challenge (HTTP 403). Open Udemy in Chrome, "
+            "complete any challenge, then export fresh cookies and retry."
+        )
+    if response.status_code == 401:
+        return "Session rejected (HTTP 401). Log into Udemy and export fresh cookies."
+    if response.status_code == 403:
+        return "Access denied (HTTP 403). Check your session and access to this course in Udemy."
+    return f"HTTP {response.status_code}"
+
+
+def fetch_curriculum(client: requests.Session, course_id: str) -> list[dict[str, Any]]:
     """Fetch all curriculum items for a course, following pagination."""
     all_items: list[dict[str, Any]] = []
     url = (
@@ -164,7 +183,7 @@ def write_metadata(
     print(f"Metadata written: {meta_path}")
 
 
-def fetch_lecture_detail(client: httpx.Client, course_id: str, lecture_id: int) -> dict[str, Any]:
+def fetch_lecture_detail(client: requests.Session, course_id: str, lecture_id: int) -> dict[str, Any]:
     """Fetch lecture metadata including caption URLs."""
     url = (
         f"https://www.udemy.com/api-2.0/users/me/subscribed-courses/{course_id}/lectures/{lecture_id}/"
@@ -231,7 +250,7 @@ def safe_filename(text: str) -> str:
 
 
 def process_lecture(
-    client: httpx.Client,
+    client: requests.Session,
     course_id: str,
     lecture: dict[str, Any],
     section_idx: int,
@@ -252,8 +271,8 @@ def process_lecture(
 
     try:
         detail = fetch_lecture_detail(client, course_id, lecture_id)
-    except httpx.HTTPStatusError as exc:
-        return False, f"API error {exc.response.status_code}"
+    except requests.exceptions.HTTPError as exc:
+        return False, f"API error: {describe_http_error(exc.response)}"
 
     asset = detail.get("asset", {})
     captions = asset.get("captions", [])
@@ -271,8 +290,8 @@ def process_lecture(
     try:
         vtt_resp = client.get(vtt_url)
         vtt_resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        return False, f"VTT download error {exc.response.status_code}"
+    except requests.exceptions.HTTPError as exc:
+        return False, f"VTT download error: {describe_http_error(exc.response)}"
 
     vtt_text = vtt_resp.text
     if not vtt_text.strip():
@@ -326,6 +345,11 @@ def main() -> None:
         default=project_root / "cookies.json",
         help="Path to exported Udemy session cookies (JSON). Default: cookies.json",
     )
+    parser.add_argument(
+        "--skip-auth-test",
+        action="store_true",
+        help="Skip the initial session check and fetch the course directly",
+    )
     args = parser.parse_args()
 
     if not args.cookies.exists():
@@ -335,11 +359,19 @@ def main() -> None:
     cookies = load_cookies(args.cookies)
     client = create_client(cookies)
 
-    print("Checking session...")
-    if not test_auth(client):
-        print("Error: Session invalid. Check your cookie file.", file=sys.stderr)
-        sys.exit(1)
-    print("Session OK.\n")
+    if args.skip_auth_test:
+        print("Skipping session check.\n")
+    else:
+        print("Checking session...")
+        try:
+            authenticated = test_auth(client)
+        except requests.exceptions.HTTPError as exc:
+            print(f"Error checking session: {describe_http_error(exc.response)}", file=sys.stderr)
+            sys.exit(1)
+        if not authenticated:
+            print("Error: Unexpected session check response.", file=sys.stderr)
+            sys.exit(1)
+        print("Session OK.\n")
 
     # Course ID
     course_id = args.course_id
@@ -359,8 +391,8 @@ def main() -> None:
     print(f"Fetching curriculum for course {course_id}...")
     try:
         items = fetch_curriculum(client, course_id)
-    except httpx.HTTPStatusError as exc:
-        print(f"Error fetching curriculum: {exc}", file=sys.stderr)
+    except requests.exceptions.HTTPError as exc:
+        print(f"Error fetching curriculum: {describe_http_error(exc.response)}", file=sys.stderr)
         sys.exit(1)
 
     sections = group_by_section(items)

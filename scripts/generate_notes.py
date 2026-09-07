@@ -69,7 +69,7 @@ def _retry_with_backoff(
 # OpenAI helpers
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a senior technical educator and curriculum designer. Your task is to take the raw transcript of a technical lecture and transform it into a rich, learner-friendly Markdown study note.
+SYSTEM_PROMPT = r"""You are a senior technical educator and curriculum designer. Your task is to take the raw transcript of a technical lecture and transform it into a rich, learner-friendly Markdown study note.
 
 ## Instructions
 
@@ -81,6 +81,24 @@ SYSTEM_PROMPT = """You are a senior technical educator and curriculum designer. 
 3. **Code Snippets**: If the transcript contains code, configuration, or pseudo-code, present it in a fenced block with the correct language tag. Add a brief explanation of what the code does.
 4. **Extended Knowledge**: Expand on the lecture content with deeper context. If you have broader knowledge about the topic, add additional explanations, comparisons to other technologies, theoretical foundations, or industry best practices that were not explicitly mentioned. This section should make the note comprehensive and valuable even after the student completes the course.
 5. **Interview Q&A**: Produce 3-5 realistic technical interview-style questions and detailed answers based on the lecture material. These should test understanding, not just memorization.
+
+## Formatting Instructions
+
+Use clear Markdown headings, concise bullet points, and nested bullets where useful.
+Use Obsidian-friendly conventions such as [[wiki links]] for important concepts,
+**bold** for key terms, and `inline code` for literal terms or commands. Use plain
+blockquotes only for especially important verbatim statements; use Obsidian callouts
+such as > [!summary], > [!definition], > [!example], and > [!warning] when they improve
+study value, alongside the callout types listed above.
+
+For any mathematical formulas, use Obsidian's native LaTeX math delimiters:
+`$...$` for inline math and `$$` on their own lines before and after block/display math.
+Never use `\(...\)` or `\[...\]` delimiters — Obsidian does not render those.
+
+Keep the output optimized for learning, retrieval, and review rather than producing
+a line-by-line transcript summary. Remove repetition, filler, and conversational
+noise. Adapt depth to the material: concise for simple content, more detailed for
+technical or concept-dense content.
 
 ## Output Format
 
@@ -138,11 +156,15 @@ def _build_openai_client(api_key: str):
     return OpenAI(api_key=api_key)
 
 
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+
 def generate_notes_for_lecture(
     client,
     model: str,
     transcript_text: str,
     system_prompt: str = SYSTEM_PROMPT,
+    reasoning_effort: str = "medium",
 ) -> str:
     """Send a single lecture transcript to the OpenAI API and return the Markdown response."""
     def _call():
@@ -152,7 +174,7 @@ def generate_notes_for_lecture(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": transcript_text},
             ],
-            temperature=0.4,
+            reasoning_effort=reasoning_effort,
             # max_tokens=4096,
         )
 
@@ -387,8 +409,15 @@ def main() -> None:
         "--model",
         "-m",
         type=str,
-        default="gpt-5.4-mini",
-        help="OpenAI model to use (default: gpt-5.4-mini)",
+        default="gpt-5.6-sol",
+        help="OpenAI model to use (default: gpt-5.6-sol)",
+    )
+    parser.add_argument(
+        "--reasoning",
+        type=str,
+        choices=REASONING_EFFORTS,
+        default="medium",
+        help="Reasoning effort for the model (default: medium)",
     )
     parser.add_argument(
         "--output-dir",
@@ -495,6 +524,7 @@ def main() -> None:
                 args.model,
                 merged_transcript,
                 system_prompt=MERGED_SYSTEM_PROMPT,
+                reasoning_effort=args.reasoning,
             )
         except RetryError as exc:
             print(f"    ❌ Failed after retries: {exc}")
@@ -514,7 +544,9 @@ def main() -> None:
                 continue
 
             try:
-                md = generate_notes_for_lecture(client, args.model, transcript)
+                md = generate_notes_for_lecture(
+                    client, args.model, transcript, reasoning_effort=args.reasoning
+                )
             except RetryError as exc:
                 print(f"    ❌ Failed after retries: {exc}")
                 note_blocks.append((source.title, "", source))

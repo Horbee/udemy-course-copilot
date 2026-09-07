@@ -73,6 +73,12 @@ uv run scripts/fetch_transcripts.py \
 | `--sections 1,3,5` | Comma-separated section indices, or `all`                             |
 | `-w, --width N`    | Text wrap width in characters (default: 80)                           |
 | `--delay SEC`      | Delay between API requests (default: 0.2)                             |
+| `--skip-auth-test` | Skip the initial session check and fetch the course directly          |
+
+The downloader uses `curl-cffi` with Chrome impersonation for browser-compatible
+connections. If a Cloudflare challenge still occurs, open Udemy in Chrome, complete
+the challenge, and export fresh cookies. `--skip-auth-test` only skips the initial
+check; it does not resolve blocked course requests.
 
 ## Workflow B: Manual HTML Extraction (Fallback)
 
@@ -224,7 +230,7 @@ udemy-course-copilot/
 
 ### Automatic Fetching (`fetch_transcripts.py`)
 
-1. **Auth**: Loads your browser cookies via `httpx` and validates the session against `/api-2.0/contexts/me/`
+1. **Auth**: Loads your browser cookies with their domain/path scope via `curl-cffi` using Chrome impersonation and validates the session against `/api-2.0/contexts/me/` (unless `--skip-auth-test` is set)
 2. **Curriculum**: Fetches the full course structure from `/api-2.0/courses/{id}/subscriber-curriculum-items/`
 3. **Lecture details**: For each selected lecture, calls `/api-2.0/users/me/subscribed-courses/{id}/lectures/{lecture_id}/` to get caption metadata
 4. **VTT download**: Downloads the English caption's signed `.vtt` URL
