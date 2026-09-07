@@ -142,6 +142,56 @@ uv run scripts/generate_notes.py --pattern day_1 --model gpt-4o-mini
 - Callouts (`> [!IMPORTANT]`, `> [!TIP]`) render natively in Obsidian with distinct colors.
 - Use Dataview queries to filter notes by tag, date, or model.
 
+## Workflow D: Single-Lecture Note + Mind Map (Optional)
+
+`obsidian_note.py` turns **one** transcript (and, optionally, its slide deck PDF) into a single
+Obsidian-flavoured Markdown note, with a **foldable Mermaid mind map** at the top that you can
+toggle open/closed inside Obsidian.
+
+When `--slides` is given, the PDF is uploaded to OpenAI via the Files API and attached directly
+to the request — the model reads the slide deck's native layout, text, diagrams, and images
+itself, rather than us extracting text locally. This requires a **vision-capable model** (the
+default, `gpt-4o`, already qualifies) and is subject to OpenAI's **32 MB per-file** limit. The
+uploaded file is deleted again after the note is generated.
+
+```bash
+# Transcript only
+uv run scripts/obsidian_note.py --transcript outputs/01_001_52932165_intro.txt
+
+# Transcript + slide deck (the PDF itself is attached to the request)
+uv run scripts/obsidian_note.py \
+  --transcript outputs/01_001_52932165_intro.txt \
+  --slides slides/01_intro.pdf
+
+# Preview without calling the API
+uv run scripts/obsidian_note.py --transcript outputs/01_001_52932165_intro.txt --dry-run
+
+# Skip the mind map, or render it expanded by default
+uv run scripts/obsidian_note.py --transcript outputs/01_001_52932165_intro.txt --no-mindmap
+uv run scripts/obsidian_note.py --transcript outputs/01_001_52932165_intro.txt --expand-mindmap
+```
+
+**What you get:**
+
+- One Markdown file per lecture (`notes/<transcript-stem>.md`)
+- A collapsible `> [!example]- 🧠 Mind Map` callout containing a Mermaid `mindmap` diagram —
+  click it in Obsidian to expand/collapse
+- Summary, topic sections, key terms, and self-test prompts, same conventions as Workflow C
+- YAML frontmatter recording the source transcript/slides and model used
+
+### CLI Reference for `obsidian_note.py`
+
+| Flag                 | Description                                                              |
+| --------------------- | ------------------------------------------------------------------------ |
+| `--transcript PATH`  | _(Required)_ Path to the lecture transcript `.txt` file                 |
+| `--slides PATH`      | Path to the lecture's slide deck `.pdf` file (optional)                 |
+| `--model MODEL`      | OpenAI model to use (default: `gpt-4o`)                                 |
+| `--output-dir PATH`  | Output directory for the generated `.md` file (default: `notes/`)       |
+| `--api-key KEY`      | OpenAI API key override (default: reads from `.env` → `OPENAI_API_KEY`) |
+| `--no-mindmap`       | Skip generating the mind map section                                    |
+| `--expand-mindmap`   | Render the mind map callout expanded by default (still foldable)        |
+| `--dry-run`          | Show what would be processed without calling the API                    |
+
 ## Project Layout
 
 ```
