@@ -107,17 +107,24 @@ echo "OPENAI_API_KEY=sk-..." > .env
 # 2. Preview which files will be matched (dry run)
 uv run scripts/generate_notes.py --pattern day_1 --dry-run
 
+# Match multiple groups with regex
+uv run scripts/generate_notes.py --pattern 'day_2|day_3' --dry-run
+
 # 3. Generate the notes
 uv run scripts/generate_notes.py --pattern day_1
 
 # 4. Use a different model (e.g., for faster/cheaper generation)
 uv run scripts/generate_notes.py --pattern day_1 --model gpt-4o-mini
+
+# 5. Merge all matched transcripts into one synthesized note
+uv run scripts/generate_notes.py --pattern day_1 --merge
 ```
 
 **What you get:**
 
 - One comprehensive Markdown file per pattern (e.g. `notes/day_1.md`)
-- **Summary** of each lecture
+- A `Sources` section near the top listing every matched transcript
+- **Summary** of each lecture, or of the merged transcript set when using `--merge`
 - **Key Concepts** with Obsidian callouts
 - **Code Snippets** (formatted with language tags)
 - **Extended Knowledge** — going beyond the lecture
@@ -129,10 +136,11 @@ uv run scripts/generate_notes.py --pattern day_1 --model gpt-4o-mini
 
 | Flag                | Description                                                                           |
 | ------------------- | ------------------------------------------------------------------------------------- |
-| `--pattern TEXT`    | _(Required)_ Substring to match in `outputs/*.txt` filenames (e.g. `day_1`, `week_2`) |
+| `--pattern REGEX`   | _(Required)_ Regex to match `outputs/*.txt` filenames (e.g. `day_1`, `day_2\|day_3`) |
 | `--model MODEL`     | OpenAI model to use (default: `gpt-4o`)                                               |
 | `--output-dir PATH` | Output directory for `.md` files (default: `notes/`)                                  |
 | `--api-key KEY`     | OpenAI API key override (default: reads from `.env` → `OPENAI_API_KEY`)               |
+| `--merge`           | Send all matched transcripts to OpenAI as one transcript and generate one note         |
 | `--dry-run`         | Show matched files without calling the API                                            |
 
 **Obsidian Tips:**

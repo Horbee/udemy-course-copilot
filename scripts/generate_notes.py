@@ -9,6 +9,7 @@ Obsidian-compatible Markdown file with YAML frontmatter.
 
 Usage:
     uv run scripts/generate_notes.py --pattern day_1
+    uv run scripts/generate_notes.py --pattern day_1 --merge
     uv run scripts/generate_notes.py --pattern day_1 --model gpt-4o-mini
     uv run scripts/generate_notes.py --pattern week_2 --dry-run
 """
@@ -80,7 +81,6 @@ SYSTEM_PROMPT = """You are a senior technical educator and curriculum designer. 
 3. **Code Snippets**: If the transcript contains code, configuration, or pseudo-code, present it in a fenced block with the correct language tag. Add a brief explanation of what the code does.
 4. **Extended Knowledge**: Expand on the lecture content with deeper context. If you have broader knowledge about the topic, add additional explanations, comparisons to other technologies, theoretical foundations, or industry best practices that were not explicitly mentioned. This section should make the note comprehensive and valuable even after the student completes the course.
 5. **Interview Q&A**: Produce 3-5 realistic technical interview-style questions and detailed answers based on the lecture material. These should test understanding, not just memorization.
-6. **Flashcards**: Produce 5-8 spaced-repetition friendly Q&A pairs. Each pair should be short enough to fit on a flashcard: a clear question and a concise answer.
 
 ## Output Format
 
@@ -110,15 +110,20 @@ Return ONLY valid Markdown. Use the following exact section headers (with `##` a
 **A1:** ...
 
 ...
-
-### Flashcards
-**Q:** ...
-**A:** ...
-
-...
 ```
 
 Do NOT include YAML frontmatter, a top-level title, or introductory/concluding sentences outside the sections.
+"""
+
+
+MERGED_SYSTEM_PROMPT = SYSTEM_PROMPT + """
+
+## Merged Transcript Mode
+
+The user may provide several lecture transcripts concatenated together with source labels.
+Treat them as one larger lesson and produce one cohesive study note, not one note per
+lecture. Synthesize repeated ideas, organize the material by concept, and avoid section
+headers for individual source files.
 """
 
 
@@ -133,13 +138,18 @@ def _build_openai_client(api_key: str):
     return OpenAI(api_key=api_key)
 
 
-def generate_notes_for_lecture(client, model: str, transcript_text: str) -> str:
+def generate_notes_for_lecture(
+    client,
+    model: str,
+    transcript_text: str,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> str:
     """Send a single lecture transcript to the OpenAI API and return the Markdown response."""
     def _call():
         return client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": transcript_text},
             ],
             temperature=0.4,
@@ -164,14 +174,18 @@ def find_project_root() -> Path:
 
 
 def discover_transcripts(project_root: Path, pattern: str) -> list[Path]:
-    """Find transcript files in outputs/ matching the given pattern (case-insensitive)."""
+    """Find transcript files in outputs/ matching the given regex pattern."""
     outputs_dir = project_root / "outputs"
     if not outputs_dir.exists():
         raise FileNotFoundError(f"Outputs directory not found: {outputs_dir}")
 
-    pattern_lower = pattern.lower()
+    try:
+        filename_re = re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        raise ValueError(f"Invalid regex pattern '{pattern}': {exc}") from exc
+
     matched = [
-        p for p in outputs_dir.glob("*.txt") if pattern_lower in p.name.lower()
+        p for p in outputs_dir.glob("*.txt") if filename_re.search(p.name)
     ]
     # Sort by filename to preserve curriculum order
     matched.sort(key=lambda p: p.name)
@@ -229,9 +243,9 @@ def _slug(text: str) -> str:
     return sl.strip("-")
 
 
-def _build_toc(note_blocks: list[tuple[str, str]]) -> str:
+def _build_toc(note_blocks: list["NoteBlock"]) -> str:
     lines = ["\n## Table of Contents\n"]
-    for title, _ in note_blocks:
+    for title, _, _ in note_blocks:
         anchor = _slug(title)
         lines.append(f"- [{title}](#{anchor})")
     lines.append("")
@@ -245,12 +259,23 @@ class CompileResult:
     skip_count: int
 
 
+@dataclass(frozen=True)
+class SourceEntry:
+    index: int
+    title: str
+    path: Path
+
+
+NoteBlock = tuple[str, str, SourceEntry | None]
+
+
 def compile_grouped_markdown(
     pattern: str,
-    note_blocks: list[tuple[str, str]],
-    source_files: list[Path],
+    note_blocks: list[NoteBlock],
+    source_entries: list[SourceEntry],
     model: str,
     output_dir: Path,
+    merged: bool = False,
 ) -> CompileResult:
     """Assemble all per-lecture notes into one Markdown file with YAML frontmatter."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -262,7 +287,8 @@ def compile_grouped_markdown(
 title: "{pattern.replace('_', ' ').title()} – Study Guide"
 generated_on: "{now}"
 model: "{model}"
-source_files: {len(source_files)}
+source_files: {len(source_entries)}
+merged: {str(merged).lower()}
 tags:
   - llm-course
   - {safe_tag}
@@ -275,14 +301,15 @@ tags:
     parts.append(f"# {pattern.replace('_', ' ').title()} – Study Guide")
     parts.append(
         f"> [!INFO] Overview\n> This study guide was generated from "
-        f"{len(source_files)} lecture transcripts using OpenAI's `{model}`.\n"
+        f"{len(source_entries)} lecture transcripts using OpenAI's `{model}`.\n"
     )
+    parts.append(_build_sources(source_entries))
     parts.append(toc)
 
     success_count = 0
     skip_count = 0
 
-    for title, content in note_blocks:
+    for title, content, source_entry in note_blocks:
         if not content:
             # Lecture was skipped
             parts.append(f"---\n\n## {title}")
@@ -297,14 +324,46 @@ tags:
         anchor = _slug(title)
         parts.append(f"---\n\n## {title}\n<a id=\"{anchor}\"></a>")
 
-        source_name = source_files[success_count].name
-        parts.append(f"*Source: `outputs/{source_name}`*\n")
+        if source_entry:
+            parts.append(f"*Source: [S{source_entry.index}]*\n")
         parts.append(content)
         parts.append("")
         success_count += 1
 
     out_path.write_text("\n".join(parts), encoding="utf-8")
     return CompileResult(output_path=out_path, success_count=success_count, skip_count=skip_count)
+
+
+def _build_sources(source_entries: list[SourceEntry]) -> str:
+    lines = ["\n## Sources\n"]
+    for source in source_entries:
+        lines.append(f"- [S{source.index}] `outputs/{source.path.name}` - {source.title}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_merged_transcript(source_entries: list[SourceEntry]) -> tuple[str, list[SourceEntry]]:
+    chunks: list[str] = []
+    empty_sources: list[SourceEntry] = []
+
+    for source in source_entries:
+        transcript = source.path.read_text(encoding="utf-8").strip()
+        if not transcript:
+            empty_sources.append(source)
+            continue
+
+        chunks.append(
+            "\n".join(
+                [
+                    f"### Source [S{source.index}]: {source.title}",
+                    f"File: outputs/{source.path.name}",
+                    "",
+                    transcript,
+                ]
+            )
+        )
+
+    return "\n\n---\n\n".join(chunks), empty_sources
 
 
 # ---------------------------------------------------------------------------
@@ -319,15 +378,17 @@ def main() -> None:
     )
     parser.add_argument(
         "--pattern",
+        "-p",
         type=str,
         required=True,
-        help="Substring to match in transcript filenames (e.g. 'day_1', 'week_2')",
+        help="Regex pattern to match transcript filenames (e.g. 'day_1', 'day_2|day_3')",
     )
     parser.add_argument(
         "--model",
+        "-m",
         type=str,
-        default="gpt-4o",
-        help="OpenAI model to use (default: gpt-4o)",
+        default="gpt-5.4-mini",
+        help="OpenAI model to use (default: gpt-5.4-mini)",
     )
     parser.add_argument(
         "--output-dir",
@@ -337,9 +398,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--api-key",
+        "-k",
         type=str,
         default=None,
         help="OpenAI API key (default: reads from .env OPENAI_API_KEY)",
+    )
+    parser.add_argument(
+        "--merge",
+        "-mg",
+        action="store_true",
+        help="Merge all matched transcripts into one OpenAI request and one generated note.",
     )
     parser.add_argument(
         "--dry-run",
@@ -363,7 +431,7 @@ def main() -> None:
     # Discover files BEFORE checking the API key so --dry-run works without one
     try:
         matched = discover_transcripts(project_root, args.pattern)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -397,47 +465,85 @@ def main() -> None:
     if meta is None:
         print("ℹ️  No .metadata.json found. Full titles require re-running fetch_transcripts.py.")
 
-    note_blocks: list[tuple[str, str]] = []
+    source_entries = [
+        SourceEntry(
+            index=i,
+            title=_extract_display_title(path.name, meta),
+            path=path,
+        )
+        for i, path in enumerate(matched, start=1)
+    ]
+
+    note_blocks: list[NoteBlock] = []
     sleep_between = 0.4  # seconds between API calls
 
     total = len(matched)
-    print(f"\nSending {total} lecture(s) to OpenAI ({args.model})...\n")
+    if args.merge:
+        print(f"\nMerging {total} lecture(s) into one OpenAI request ({args.model})...\n")
+        merged_transcript, empty_sources = _build_merged_transcript(source_entries)
+        for source in empty_sources:
+            print(f"  ⚠️  Skipping empty transcript: {source.title}")
 
-    for i, path in enumerate(matched, start=1):
-        title = _extract_display_title(path.name, meta)
-        print(f"  [{i}/{total}] {title}")
-
-        transcript = path.read_text(encoding="utf-8")
-        if not transcript.strip():
-            print("    ⚠️  Skipping empty transcript.")
-            note_blocks.append((title, ""))
-            continue
+        merged_title = f"{args.pattern.replace('_', ' ').title()} Notes"
+        if not merged_transcript.strip():
+            print("Error: all matched transcripts are empty.", file=sys.stderr)
+            sys.exit(1)
 
         try:
-            md = generate_notes_for_lecture(client, args.model, transcript)
+            md = generate_notes_for_lecture(
+                client,
+                args.model,
+                merged_transcript,
+                system_prompt=MERGED_SYSTEM_PROMPT,
+            )
         except RetryError as exc:
             print(f"    ❌ Failed after retries: {exc}")
-            note_blocks.append((title, ""))
-            continue
+            note_blocks.append((merged_title, "", None))
+        else:
+            note_blocks.append((merged_title, md, None))
+    else:
+        print(f"\nSending {total} lecture(s) to OpenAI ({args.model})...\n")
 
-        note_blocks.append((title, md))
-        if i < total:
-            time.sleep(sleep_between)
+        for i, source in enumerate(source_entries, start=1):
+            print(f"  [{i}/{total}] {source.title}")
+
+            transcript = source.path.read_text(encoding="utf-8")
+            if not transcript.strip():
+                print("    ⚠️  Skipping empty transcript.")
+                note_blocks.append((source.title, "", source))
+                continue
+
+            try:
+                md = generate_notes_for_lecture(client, args.model, transcript)
+            except RetryError as exc:
+                print(f"    ❌ Failed after retries: {exc}")
+                note_blocks.append((source.title, "", source))
+                continue
+
+            note_blocks.append((source.title, md, source))
+            if i < total:
+                time.sleep(sleep_between)
 
     # Compile
     result = compile_grouped_markdown(
         pattern=args.pattern,
         note_blocks=note_blocks,
-        source_files=matched,
+        source_entries=source_entries,
         model=args.model,
         output_dir=args.output_dir,
+        merged=args.merge,
     )
 
     print(f"\n{'='*60}")
     print(f"✅  Notes written to: {result.output_path}")
-    print(f"   Lectures included:   {result.success_count}")
-    print(f"   Lectures skipped:    {result.skip_count}")
-    print(f"   Total transcripts:   {total}")
+    if args.merge:
+        print(f"   Notes generated:     {result.success_count}")
+        print(f"   Notes skipped:       {result.skip_count}")
+        print(f"   Source transcripts:  {total}")
+    else:
+        print(f"   Lectures included:   {result.success_count}")
+        print(f"   Lectures skipped:    {result.skip_count}")
+        print(f"   Total transcripts:   {total}")
     print(f"{'='*60}")
 
 
